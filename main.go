@@ -41,6 +41,7 @@ func main() {
 		mirror       = flag.Bool("mirror", false, "Mirror the website")
 		reject       = flag.String("R", "", "Reject suffixes (comma separated: jpg,gif)")
 		exclude      = flag.String("X", "", "Exclude directories (comma separated: /js,/css)")
+		//convertlinks = flag.String("convert-links", "", "convert-links")
 	)
 
 	flag.Parse()
@@ -67,6 +68,7 @@ func main() {
 	// Rate limit
 	if *rateLimitStr != "" {
 		d.rateLimit = parseRateLimit(*rateLimitStr)
+		fmt.Println(d.rateLimit,"------")
 	}
 
 	d.startTime = time.Now()
@@ -81,6 +83,7 @@ func main() {
 		}
 		rejectList := strings.Split(*reject, ",")
 		excludeList := strings.Split(*exclude, ",")
+		//convertlinksList :=  strings.Split(*convertlinks , ",")
 		d.mirrorWebsite(urls[0], rejectList, excludeList)
 		return
 	}
@@ -124,7 +127,6 @@ func (d *Downloader) downloadSingle(rawURL string) {
 	fmt.Fprintf(d.outWriter, "content size: %d [%s]\n", contentLength, humanSize(contentLength))
 
 	filename := d.saveName
-	fmt.Println(filename,"++++++++")
 	if filename == "" {
 		filename = path.Base(rawURL)
 		if filename == "" || filename == "/" || filename == "." {
@@ -145,6 +147,7 @@ func (d *Downloader) downloadSingle(rawURL string) {
 	}
 
 	reader := getResp.Body
+	
 	if d.rateLimit > 0 {
 		reader = newRateLimitedReader(getResp.Body, d.rateLimit)
 	}
