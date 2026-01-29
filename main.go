@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	//"bytes"
 	"flag"
 	"fmt"
 	"io"
@@ -22,39 +23,41 @@ import (
 const logFileName = "wget-log"
 
 type Downloader struct {
-	client    *http.Client
-	rateLimit int64 // bytes/sec, 0 = unlimited
-	startTime time.Time
-	outWriter io.Writer
-	errWriter io.Writer
-	saveDir   string
-	saveName  string
+	client       *http.Client
+	rateLimit    int64
+	startTime    time.Time
+	outWriter    io.Writer
+	errWriter    io.Writer
+	saveDir      string
+	saveName     string
+	convertLinks bool
 }
 
+/* ===================== MAIN ===================== */
+
 func main() {
-	var (
-		background   = flag.Bool("B", false, "Download in background")
-		output       = flag.String("O", "", "Save file with this name")
-		prefix       = flag.String("P", ".", "Save files to this directory")
-		rateLimitStr = flag.String("rate-limit", "", "Limit download rate (e.g. 400k, 2M)")
-		inputFile    = flag.String("i", "", "Read URLs from this file")
-		mirror       = flag.Bool("mirror", false, "Mirror the website")
-		reject       = flag.String("R", "", "Reject suffixes (comma separated: jpg,gif)")
-		exclude      = flag.String("X", "", "Exclude directories (comma separated: /js,/css)")
-		//convertlinks = flag.String("convert-links", "", "convert-links")
-	)
+	background := flag.Bool("B", false, "background")
+	output := flag.String("O", "", "output name")
+	prefix := flag.String("P", ".", "output directory")
+	rateLimitStr := flag.String("rate-limit", "", "rate limit")
+	inputFile := flag.String("i", "", "input file")
+	mirror := flag.Bool("mirror", false, "mirror website")
+	reject := flag.String("R", "", "reject extensions")
+	exclude := flag.String("X", "", "exclude paths")
+	convert := flag.Bool("convert-links", false, "convert links")
 
 	flag.Parse()
 	urls := flag.Args()
+
 	d := &Downloader{
-		client:    &http.Client{},
-		outWriter: os.Stdout,
-		errWriter: os.Stderr,
-		saveDir:   *prefix,
-		saveName:  *output,
+		client:       &http.Client{},
+		outWriter:    os.Stdout,
+		errWriter:    os.Stderr,
+		saveDir:      *prefix,
+		saveName:     *output,
+		convertLinks: *convert,
 	}
 
-	// Background mode
 	if *background {
 		f, err := os.Create(logFileName)
 		if err != nil {
@@ -62,251 +65,174 @@ func main() {
 		}
 		d.outWriter = f
 		d.errWriter = f
-		fmt.Printf("Output will be written to \"%s\".\n", logFileName)
+		fmt.Println(`Output will be written to "wget-log".`)
 	}
 
-	// Rate limit
 	if *rateLimitStr != "" {
 		d.rateLimit = parseRateLimit(*rateLimitStr)
-		fmt.Println(d.rateLimit,"------")
 	}
 
 	d.startTime = time.Now()
 	fmt.Fprintf(d.outWriter, "start at %s\n", d.startTime.Format("2006-01-02 15:04:05"))
 
-	// Mirror mode
 	if *mirror {
 		if len(urls) == 0 {
-			fmt.Fprintln(d.errWriter, "Error: --mirror requires a URL")
-			flag.Usage()
-			os.Exit(1)
+			log.Fatal("mirror requires URL")
 		}
-		rejectList := strings.Split(*reject, ",")
-		excludeList := strings.Split(*exclude, ",")
-		//convertlinksList :=  strings.Split(*convertlinks , ",")
-		d.mirrorWebsite(urls[0], rejectList, excludeList)
+		d.mirrorWebsite(urls[0],
+			strings.Split(*reject, ","),
+			strings.Split(*exclude, ","),
+		)
 		return
 	}
 
-	// Input file mode
 	if *inputFile != "" {
 		urls = readLines(*inputFile)
 	}
 
-	if len(urls) == 0 {
-		fmt.Fprintln(d.errWriter, "Error: No URL provided")
-		flag.Usage()
-		os.Exit(1)
-	}
-
-	if len(urls) > 1 {
-		d.downloadMultiple(urls)
-	} else {
-		fmt.Println(urls)
+	if len(urls) == 1 {
 		d.downloadSingle(urls[0])
+	} else {
+		d.downloadMultiple(urls)
 	}
 }
 
-// ====================== Single Download ======================
+/* ===================== DOWNLOAD ===================== */
+
 func (d *Downloader) downloadSingle(rawURL string) {
 	resp, err := d.client.Head(rawURL)
-	fmt.Println(err)
-	if err != nil || resp.StatusCode != http.StatusOK {
-		status := "unknown"
-		if resp != nil {
-			status = resp.Status
-		}
-		fmt.Fprintf(d.errWriter, "sending request, awaiting response... status %s\n", status)
-		os.Exit(1)
-		
+	if err != nil || resp.StatusCode != 200 {
+		log.Fatal("request failed")
 	}
-	contentLength := resp.ContentLength
+	size := resp.ContentLength
 	resp.Body.Close()
 
 	fmt.Fprintf(d.outWriter, "sending request, awaiting response... status 200 OK\n")
-	fmt.Fprintf(d.outWriter, "content size: %d [%s]\n", contentLength, humanSize(contentLength))
+	fmt.Fprintf(d.outWriter, "content size: %d [%s]\n", size, humanSize(size))
 
-	filename := d.saveName
-	if filename == "" {
-		filename = path.Base(rawURL)
-		if filename == "" || filename == "/" || filename == "." {
-			filename = "index.html"
-		}
+	name := d.saveName
+	if name == "" {
+		name = path.Base(rawURL)
 	}
-	savePath := filepath.Join(d.saveDir, filename)
-	if err := os.MkdirAll(filepath.Dir(savePath), 0755); err != nil {
-		fmt.Fprintf(d.errWriter, "Error creating directory: %v\n", err)
-		os.Exit(1)
-	}
+	savePath := filepath.Join(d.saveDir, name)
+	os.MkdirAll(filepath.Dir(savePath), 0755)
+
 	fmt.Fprintf(d.outWriter, "saving file to: %s\n", savePath)
 
-	getResp, err := d.client.Get(rawURL)
-	if err != nil {
-		fmt.Fprintf(d.errWriter, "Download error: %v\n", err)
-		os.Exit(1)
-	}
-
-	reader := getResp.Body
-	
+	r, _ := d.client.Get(rawURL)
+	reader := r.Body
 	if d.rateLimit > 0 {
-		reader = newRateLimitedReader(getResp.Body, d.rateLimit)
+		reader = newRateLimitedReader(r.Body, d.rateLimit)
 	}
 	defer reader.Close()
 
-	file, err := os.Create(savePath)
-	if err != nil {
-		fmt.Fprintf(d.errWriter, "Cannot create file: %v\n", err)
-		os.Exit(1)
-	}
-	defer file.Close()
+	f, _ := os.Create(savePath)
+	defer f.Close()
 
-	progress := newProgress(contentLength, d.outWriter)
-	_, err = io.Copy(io.MultiWriter(file, progress), reader)
-	if err != nil {
-		fmt.Fprintf(d.errWriter, "Download failed: %v\n", err)
-		os.Exit(1)
-	}
-	progress.finish()
+	p := newProgress(size, d.outWriter)
+	io.Copy(io.MultiWriter(f, p), reader)
+	p.finish()
 
 	fmt.Fprintf(d.outWriter, "\nDownloaded [%s]\n", rawURL)
 	fmt.Fprintf(d.outWriter, "finished at %s\n", time.Now().Format("2006-01-02 15:04:05"))
 }
 
-// ====================== Multiple Downloads ======================
 func (d *Downloader) downloadMultiple(urls []string) {
 	var wg sync.WaitGroup
 	for _, u := range urls {
 		wg.Add(1)
-		go func(url string) {
+		go func(u string) {
 			defer wg.Done()
-			tempD := *d
-			if len(urls) > 1 {
-				tempD.saveName = ""
-			}
-			tempD.downloadSingle(url)
-			fmt.Fprintf(d.outWriter, "finished %s\n", path.Base(url))
+			tmp := *d
+			tmp.saveName = ""
+			tmp.downloadSingle(u)
 		}(u)
 	}
 	wg.Wait()
-
-	fmt.Fprint(d.outWriter, "Download finished: [")
-	for i, u := range urls {
-		if i > 0 {
-			fmt.Fprint(d.outWriter, " ")
-		}
-		fmt.Fprint(d.outWriter, u)
-	}
-	fmt.Fprintln(d.outWriter, "]")
 }
 
-// ====================== Mirroring ======================
+/* ===================== MIRROR ===================== */
+
 func (d *Downloader) mirrorWebsite(baseURL string, reject, exclude []string) {
-	baseParsed, err := url.Parse(baseURL)
-	if err != nil {
-		log.Fatal(err)
+	base, _ := url.Parse(baseURL)
+	hostDir := base.Host
+	os.MkdirAll(hostDir, 0755)
+
+	rejectMap := map[string]bool{}
+	for _, r := range reject {
+		if r != "" {
+			if !strings.HasPrefix(r, ".") {
+				r = "." + r
+			}
+			rejectMap[r] = true
+		}
 	}
 
-	// ---------- reject extensions ----------
-	rejectMap := make(map[string]bool)
-	for _, s := range reject {
-		s = strings.TrimSpace(s)
-		if s == "" {
-			continue
+	excludeMap := map[string]bool{}
+	for _, e := range exclude {
+		if e != "" {
+			if !strings.HasPrefix(e, "/") {
+				e = "/" + e
+			}
+			excludeMap[e] = true
 		}
-		if !strings.HasPrefix(s, ".") {
-			s = "." + s
-		}
-		rejectMap[s] = true
 	}
-
-	// ---------- exclude directories ----------
-	excludeMap := make(map[string]bool)
-	for _, p := range exclude {
-		p = strings.TrimSpace(p)
-		if p == "" {
-			continue
-		}
-		if !strings.HasPrefix(p, "/") {
-			p = "/" + p
-		}
-		if !strings.HasSuffix(p, "/") {
-			p += "/"
-		}
-		excludeMap[p] = true
-	}
-
-	hostDir := baseParsed.Host
-	_ = os.MkdirAll(hostDir, 0755)
 
 	var visited sync.Map
 	var wg sync.WaitGroup
 
 	var crawl func(string)
-
-	crawl = func(currentURL string) {
+	crawl = func(u string) {
 		defer wg.Done()
-
-		if _, seen := visited.LoadOrStore(currentURL, true); seen {
+		if _, ok := visited.LoadOrStore(u, true); ok {
 			return
 		}
 
-		parsed, err := url.Parse(currentURL)
-		if err != nil || parsed.Host != baseParsed.Host {
+		pu, _ := url.Parse(u)
+		if pu.Host != base.Host {
 			return
 		}
 
-		filePath := parsed.Path
-		if filePath == "" || filePath == "/" {
-			filePath = "/index.html"
+		pathLocal := pu.Path
+		if pathLocal == "" || pathLocal == "/" {
+			pathLocal = "/index.html"
 		}
-
-		savePath := filepath.Join(hostDir, filePath)
-		if strings.HasSuffix(parsed.Path, "/") {
+		savePath := filepath.Join(hostDir, pathLocal)
+		if strings.HasSuffix(pathLocal, "/") {
 			savePath = filepath.Join(savePath, "index.html")
 		}
 
-		if ext := filepath.Ext(savePath); rejectMap[ext] {
+		if rejectMap[filepath.Ext(savePath)] {
 			return
 		}
-
-		for excl := range excludeMap {
-			if strings.HasPrefix(parsed.Path+"/", excl) {
+		for ex := range excludeMap {
+			if strings.HasPrefix(pu.Path, ex) {
 				return
 			}
 		}
 
-		_ = os.MkdirAll(filepath.Dir(savePath), 0755)
-
-		resp, err := http.Get(currentURL)
-		if err != nil || resp.StatusCode != http.StatusOK {
-			if resp != nil {
-				resp.Body.Close()
-			}
+		resp, err := http.Get(u)
+		if err != nil || resp.StatusCode != 200 {
 			return
 		}
-		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
 
-		bodyBytes, err := io.ReadAll(resp.Body)
-		if err != nil {
-			return
+		if d.convertLinks {
+			body = convertLinks(body, hostDir)
 		}
 
-		f, err := os.Create(savePath)
-		if err != nil {
-			return
-		}
-		_, _ = f.Write(bodyBytes)
-		f.Close()
+		os.MkdirAll(filepath.Dir(savePath), 0755)
+		os.WriteFile(savePath, body, 0644)
 
-		contentType := resp.Header.Get("Content-Type")
-		if strings.Contains(contentType, "text/html") || strings.Contains(contentType, "text/css") {
-			re := regexp.MustCompile(`(?:href|src|url)\s*=\s*["']([^"']+)["']`)
-			for _, m := range re.FindAllSubmatch(bodyBytes, -1) {
+		if strings.Contains(resp.Header.Get("Content-Type"), "text") {
+			re := regexp.MustCompile(`(?:href|src)=["']([^"']+)["']`)
+			for _, m := range re.FindAllSubmatch(body, -1) {
 				link := string(m[1])
-				absURL := resolveURL(currentURL, link)
-				if absURL != "" {
+				abs := resolveURL(u, link)
+				if abs != "" {
 					wg.Add(1)
-					go crawl(absURL) 
+					go crawl(abs)
 				}
 			}
 		}
@@ -316,173 +242,104 @@ func (d *Downloader) mirrorWebsite(baseURL string, reject, exclude []string) {
 	go crawl(baseURL)
 	wg.Wait()
 
-	fmt.Fprintf(d.outWriter, "Mirroring completed for %s\n", baseURL)
+	fmt.Println("Mirroring completed")
 }
 
+/* ===================== CONVERT LINKS ===================== */
 
-// ====================== Helpers ======================
+func convertLinks(body []byte, host string) []byte {
+	re := regexp.MustCompile(`(href|src)=["']https?://[^/]+(/[^"']*)["']`)
+	return re.ReplaceAll(body, []byte(`$1="$2"`))
+}
+
+/* ===================== HELPERS ===================== */
+
 func resolveURL(base, ref string) string {
 	b, _ := url.Parse(base)
 	r, err := url.Parse(ref)
 	if err != nil {
 		return ""
 	}
-	resolved := b.ResolveReference(r)
-	if resolved.Scheme == "" {
-		return ""
-	}
-	return resolved.String()
+	return b.ResolveReference(r).String()
 }
 
-func readLines(filename string) []string {
-	f, err := os.Open(filename)
-	if err != nil {
-		log.Fatal(err)
-	}
+func readLines(file string) []string {
+	f, _ := os.Open(file)
 	defer f.Close()
-	var lines []string
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line != "" && !strings.HasPrefix(line, "#") {
-			lines = append(lines, line)
-		}
+	var out []string
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		out = append(out, strings.TrimSpace(sc.Text()))
 	}
-	return lines
+	return out
 }
 
 func parseRateLimit(s string) int64 {
-	s = strings.ToLower(strings.TrimSpace(s))
-	mult := int64(1)
+	s = strings.ToLower(s)
+	m := int64(1)
 	if strings.HasSuffix(s, "k") {
-		mult = 1024
+		m = 1024
 		s = strings.TrimSuffix(s, "k")
 	} else if strings.HasSuffix(s, "m") {
-		mult = 1024 * 1024
+		m = 1024 * 1024
 		s = strings.TrimSuffix(s, "m")
 	}
 	n, _ := strconv.ParseInt(s, 10, 64)
-	return n * mult
+	return n * m
 }
 
-func humanSize(bytes int64) string {
-	if bytes < 1024*1024 {
-		return fmt.Sprintf("~%.2fKB", float64(bytes)/1024)
-	} else if bytes < 1024*1024*1024 {
-		return fmt.Sprintf("~%.2fMB", float64(bytes)/(1024*1024))
-	}
-	return fmt.Sprintf("~%.2fGB", float64(bytes)/(1024*1024*1024))
+func humanSize(b int64) string {
+	return fmt.Sprintf("~%.2fMB", float64(b)/(1024*1024))
 }
 
-// ====================== Progress Bar ======================
+/* ===================== PROGRESS ===================== */
+
 type progressWriter struct {
-	total      int64
-	downloaded int64
-	writer     io.Writer
-	start      time.Time
-	last       time.Time
-	mu         sync.Mutex
+	total int64
+	done  int64
+	start time.Time
+	w     io.Writer
 }
 
-func newProgress(total int64, w io.Writer) *progressWriter {
-	return &progressWriter{
-		total:  total,
-		writer: w,
-		start:  time.Now(),
-		last:   time.Now(),
-	}
+func newProgress(t int64, w io.Writer) *progressWriter {
+	return &progressWriter{total: t, start: time.Now(), w: w}
 }
 
 func (p *progressWriter) Write(b []byte) (int, error) {
 	n := len(b)
-	atomic.AddInt64(&p.downloaded, int64(n))
-
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	now := time.Now()
-	if now.Sub(p.last) < 150*time.Millisecond && p.downloaded < p.total {
-		return n, nil
-	}
-	p.last = now
-
-	down := atomic.LoadInt64(&p.downloaded)
-	perc := 100.0 * float64(down) / float64(p.total)
-	elapsed := now.Sub(p.start).Seconds()
-	speed := float64(down) / elapsed / (1024 * 1024)
-
-	remaining := "?"
-	if speed > 0 {
-		left := (float64(p.total) - float64(down)) / (speed * 1024 * 1024)
-		if left < 1 {
-			remaining = "<1s"
-		} else {
-			remaining = fmt.Sprintf("%.0fs", left)
-		}
-	}
-
-	downStr, totalStr := formatProgressSize(down, p.total)
-
-	barLen := 50
-	filled := int(perc / 2)
-	bar := strings.Repeat("=", filled) + strings.Repeat(" ", barLen-filled)
-
-	fmt.Fprintf(p.writer,
-		"\r %s / %s [%s] %.2f%% %.2f MiB/s %s",
-		downStr, totalStr, bar, perc, speed, remaining,
-	)
-
+	atomic.AddInt64(&p.done, int64(n))
+	perc := float64(p.done) * 100 / float64(p.total)
+	fmt.Fprintf(p.w, "\r%.2f%%", perc)
 	return n, nil
 }
 
 func (p *progressWriter) finish() {
-	fmt.Fprintln(p.writer)
+	fmt.Fprintln(p.w)
 }
 
-func formatProgressSize(downloaded, total int64) (string, string) {
-	if total > 10*1024*1024 {
-		return fmt.Sprintf("%.2f MiB", float64(downloaded)/(1024*1024)),
-			fmt.Sprintf("%.2f MiB", float64(total)/(1024*1024))
-	}
-	return fmt.Sprintf("%.2f KiB", float64(downloaded)/1024),
-		fmt.Sprintf("%.2f KiB", float64(total)/1024)
-}
+/* ===================== RATE LIMIT ===================== */
 
-// ====================== Rate Limiter ======================
 type rateLimitedReadCloser struct {
 	rc    io.ReadCloser
 	limit int64
-	start time.Time
 	read  int64
-	mu    sync.Mutex
+	start time.Time
 }
 
-func newRateLimitedReader(rc io.ReadCloser, limit int64) io.ReadCloser {
-	return &rateLimitedReadCloser{
-		rc:    rc,
-		limit: limit,
-		start: time.Now(),
-	}
+func newRateLimitedReader(rc io.ReadCloser, l int64) io.ReadCloser {
+	return &rateLimitedReadCloser{rc: rc, limit: l, start: time.Now()}
 }
 
-func (rl *rateLimitedReadCloser) Read(p []byte) (int, error) {
-	n, err := rl.rc.Read(p)
-	if n > 0 {
-		rl.mu.Lock()
-		rl.read += int64(n)
-		elapsed := time.Since(rl.start).Seconds()
-		allowed := int64(float64(rl.limit) * elapsed)
-		if rl.read > allowed && rl.limit > 0 {
-			sleepTime := time.Duration(float64(rl.read-allowed)/float64(rl.limit) * float64(time.Second))
-			rl.mu.Unlock()
-			time.Sleep(sleepTime)
-			rl.mu.Lock()
-		}
-		rl.mu.Unlock()
+func (r *rateLimitedReadCloser) Read(p []byte) (int, error) {
+	n, err := r.rc.Read(p)
+	r.read += int64(n)
+	allowed := int64(float64(r.limit) * time.Since(r.start).Seconds())
+	if r.read > allowed {
+		time.Sleep(50 * time.Millisecond)
 	}
 	return n, err
 }
 
-func (rl *rateLimitedReadCloser) Close() error {
-	return rl.rc.Close()
+func (r *rateLimitedReadCloser) Close() error {
+	return r.rc.Close()
 }
