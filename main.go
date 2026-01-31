@@ -2,7 +2,7 @@ package main
 
 import (
 	"bufio"
-	//"bytes"
+	"bytes"
 	"flag"
 	"fmt"
 	"io"
@@ -18,6 +18,9 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"golang.org/x/net/html"
+	//"bytes"
 )
 
 const logFileName = "wget-log"
@@ -115,7 +118,7 @@ func (d *Downloader) downloadSingle(rawURL string) {
 		name = path.Base(rawURL)
 	}
 	savePath := filepath.Join(d.saveDir, name)
-	os.MkdirAll(filepath.Dir(savePath), 0755)
+	os.MkdirAll(filepath.Dir(savePath), 0o755)
 
 	fmt.Fprintf(d.outWriter, "saving file to: %s\n", savePath)
 
@@ -154,95 +157,131 @@ func (d *Downloader) downloadMultiple(urls []string) {
 /* ===================== MIRROR ===================== */
 
 func (d *Downloader) mirrorWebsite(baseURL string, reject, exclude []string) {
-	base, _ := url.Parse(baseURL)
-	hostDir := base.Host
-	os.MkdirAll(hostDir, 0755)
-
-	rejectMap := map[string]bool{}
-	for _, r := range reject {
-		if r != "" {
-			if !strings.HasPrefix(r, ".") {
-				r = "." + r
-			}
-			rejectMap[r] = true
-		}
+	parsedBase, err := url.Parse(baseURL)
+	if err != nil {
+		fmt.Fprintln(d.errWriter, "invalid url")
+		return
 	}
 
-	excludeMap := map[string]bool{}
-	for _, e := range exclude {
-		if e != "" {
-			if !strings.HasPrefix(e, "/") {
-				e = "/" + e
-			}
-			excludeMap[e] = true
-		}
-	}
-
-	var visited sync.Map
-	var wg sync.WaitGroup
+	domain := parsedBase.Host
+	visited := make(map[string]bool)
 
 	var crawl func(string)
-	crawl = func(u string) {
-		defer wg.Done()
-		if _, ok := visited.LoadOrStore(u, true); ok {
+	crawl = func(current string) {
+		if visited[current] {
+			return
+		}
+		visited[current] = true
+
+		u, err := url.Parse(current)
+		if err != nil || u.Host != domain {
 			return
 		}
 
-		pu, _ := url.Parse(u)
-		if pu.Host != base.Host {
+		resp, err := d.client.Get(current)
+		if err != nil {
+			return
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
 			return
 		}
 
-		pathLocal := pu.Path
-		if pathLocal == "" || pathLocal == "/" {
-			pathLocal = "/index.html"
-		}
-		savePath := filepath.Join(hostDir, pathLocal)
-		if strings.HasSuffix(pathLocal, "/") {
-			savePath = filepath.Join(savePath, "index.html")
-		}
+		localPath := d.buildLocalPath(domain, u.Path)
+		os.MkdirAll(filepath.Dir(localPath), 0o755)
 
-		if rejectMap[filepath.Ext(savePath)] {
-			return
-		}
-		for ex := range excludeMap {
-			if strings.HasPrefix(pu.Path, ex) {
-				return
-			}
-		}
-
-		resp, err := http.Get(u)
-		if err != nil || resp.StatusCode != 200 {
-			return
-		}
 		body, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
+		os.WriteFile(localPath, body, 0o644)
+
+		// parse only HTML
+		if !strings.Contains(resp.Header.Get("Content-Type"), "text/html") {
+			return
+		}
+
+		links := extractLinks(bytes.NewReader(body))
+
+		for _, link := range links {
+			abs := resolveURL(current, link)
+			if abs == "" {
+				continue
+			}
+
+			if isRejected(abs, reject) || isExcluded(abs, exclude) {
+				continue
+			}
+
+			crawl(abs)
+		}
 
 		if d.convertLinks {
-			body = convertLinks(body, hostDir)
+			convertHTMLLinks(localPath, domain)
 		}
+	}
 
-		os.MkdirAll(filepath.Dir(savePath), 0755)
-		os.WriteFile(savePath, body, 0644)
+	start := baseURL
+	if !strings.HasSuffix(start, "/") {
+		start += "/"
+	}
+	crawl(start)
+}
 
-		if strings.Contains(resp.Header.Get("Content-Type"), "text") {
-			re := regexp.MustCompile(`(?:href|src)=["']([^"']+)["']`)
-			for _, m := range re.FindAllSubmatch(body, -1) {
-				link := string(m[1])
-				abs := resolveURL(u, link)
-				if abs != "" {
-					wg.Add(1)
-					go crawl(abs)
+/*--------------------------help-------------------*/
+func isExcluded(link string, exclude []string) bool {
+	u, _ := url.Parse(link)
+	for _, path := range exclude {
+		if strings.HasPrefix(u.Path, path) {
+			return true
+		}
+	}
+	return false
+}
+
+func isRejected(link string, reject []string) bool {
+	for _, ext := range reject {
+		if strings.HasSuffix(link, "."+ext) {
+			return true
+		}
+	}
+	return false
+}
+
+func (d *Downloader) buildLocalPath(domain, path string) string {
+	if path == "" || path == "/" {
+		path = "/index.html"
+	}
+	return filepath.Join(d.saveDir, domain, path)
+}
+
+func extractLinks(r io.Reader) []string {
+	var links []string
+	doc, _ := html.Parse(r)
+
+	var f func(*html.Node)
+	f = func(n *html.Node) {
+		if n.Type == html.ElementNode {
+			for _, a := range n.Attr {
+				if a.Key == "href" || a.Key == "src" {
+					links = append(links, a.Val)
 				}
 			}
 		}
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
+			f(c)
+		}
 	}
+	f(doc)
+	return links
+}
 
-	wg.Add(1)
-	go crawl(baseURL)
-	wg.Wait()
+func convertHTMLLinks(path, domain string) {
+	data, _ := os.ReadFile(path)
+	html := string(data)
 
-	fmt.Println("Mirroring completed")
+	html = strings.ReplaceAll(html, "https://"+domain, ".")
+	html = strings.ReplaceAll(html, "http://"+domain, ".")
+
+	os.WriteFile(path, []byte(html), 0o644)
 }
 
 /* ===================== CONVERT LINKS ===================== */
