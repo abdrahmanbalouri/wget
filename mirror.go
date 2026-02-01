@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -17,6 +18,7 @@ func (d *Downloader) mirrorWebsite(baseURL string, reject, exclude []string) {
 
 	parsedBase, err := url.Parse(baseURL)
 	if err != nil {
+		fmt.Fprintln(d.errWriter, "invalid url")
 		return
 	}
 
