@@ -34,9 +34,27 @@ func parseRateLimit(s string) int64 {
 	return n * m
 }
 
-func humanSize(b int64) string {
-	return fmt.Sprintf("~%.2fMB", float64(b)/(1024*1024))
+func humanSize(n int64) string {
+	const (
+		KB = 1024
+		MB = 1024 * KB
+	)
+
+	switch {
+	case n >= MB:
+		return fmt.Sprintf("%.2f MiB", float64(n)/MB)
+	case n >= KB:
+		return fmt.Sprintf("%.2f KiB", float64(n)/KB)
+	default:
+		return fmt.Sprintf("%d B", n)
+	}
 }
+func approxMB(n int64) string {
+	mb := float64(n) / (1000 * 1000) // wget-style
+	return fmt.Sprintf("~%.2fMB", mb)
+}
+
+
 
 func resolveURL(base, ref string) string {
 	b, _ := url.Parse(base)

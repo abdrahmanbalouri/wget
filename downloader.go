@@ -36,7 +36,7 @@ func (d *Downloader) downloadSingle(rawURL string) {
 	resp.Body.Close()
 
 	fmt.Fprintf(d.outWriter, "sending request, awaiting response... status 200 OK\n")
-	fmt.Fprintf(d.outWriter, "content size: %d [%s]\n", size, humanSize(size))
+	fmt.Fprintf(d.outWriter, "content size: %d [%s]\n", size, approxMB(size))
 
 	name := d.saveName
 	if name == "" {
