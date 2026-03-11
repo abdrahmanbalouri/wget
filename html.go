@@ -1,46 +1,65 @@
 package main
 
 import (
-	"io"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
-
-	"golang.org/x/net/html"
 )
 
-func extractLinks(r io.Reader) []string {
-	var links []string
-	doc, _ := html.Parse(r)
-
-	var f func(*html.Node)
-	f = func(n *html.Node) {
-		if n.Type == html.ElementNode {
-			for _, a := range n.Attr {
-				if a.Key == "href" || a.Key == "src" {
-					links = append(links, a.Val)
-				}
-			}
-		}
-		for c := n.FirstChild; c != nil; c = c.NextSibling {
-			f(c)
+func extractLinksFromHTML(body []byte) []string {
+	re := regexp.MustCompile(`(?is)<(?:a|link)\b[^>]*\bhref=["']([^"']+)["']|<(?:img)\b[^>]*\bsrc=["']([^"']+)["']`)
+	matches := re.FindAllSubmatch(body, -1)
+	links := make([]string, 0, len(matches))
+	for _, match := range matches {
+		switch {
+		case len(match) > 1 && len(match[1]) > 0:
+			links = append(links, string(match[1]))
+		case len(match) > 2 && len(match[2]) > 0:
+			links = append(links, string(match[2]))
 		}
 	}
-	f(doc)
 	return links
 }
 
-func convertHTMLLinks(path, domain string) {
-	data, _ := os.ReadFile(path)
-	html := string(data)
-
-	html = strings.ReplaceAll(html, "https://"+domain, ".")
-	html = strings.ReplaceAll(html, "http://"+domain, ".")
-
-	os.WriteFile(path, []byte(html), 0o644)
+func extractCSSLinks(body []byte) []string {
+	re := regexp.MustCompile(`url\((['"]?)([^'")]+)\1\)`)
+	matches := re.FindAllSubmatch(body, -1)
+	links := make([]string, 0, len(matches))
+	for _, match := range matches {
+		if len(match) > 2 {
+			links = append(links, string(match[2]))
+		}
+	}
+	return links
 }
 
-func convertLinks(body []byte, host string) []byte {
-	re := regexp.MustCompile(`(href|src)=["']https?://[^/]+(/[^"']*)["']`)
-	return re.ReplaceAll(body, []byte(`$1="$2"`))
+func convertHTMLLinks(path string, rewrites map[string]string) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+
+	content := string(data)
+	for original, local := range rewrites {
+		local = filepath.ToSlash(local)
+		content = strings.ReplaceAll(content, `href="`+original+`"`, `href="`+local+`"`)
+		content = strings.ReplaceAll(content, `href='`+original+`'`, `href='`+local+`'`)
+		content = strings.ReplaceAll(content, `src="`+original+`"`, `src="`+local+`"`)
+		content = strings.ReplaceAll(content, `src='`+original+`'`, `src='`+local+`'`)
+	}
+
+	_ = os.WriteFile(path, []byte(content), 0o644)
+}
+
+func convertCSSLinks(path string, rewrites map[string]string) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	content := string(data)
+	for original, local := range rewrites {
+		content = strings.ReplaceAll(content, original, filepath.ToSlash(local))
+	}
+	_ = os.WriteFile(path, []byte(content), 0o644)
 }

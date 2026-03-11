@@ -28,26 +28,42 @@ func (p *progressWriter) Write(b []byte) (int, error) {
 	atomic.AddInt64(&p.done, int64(n))
 
 	elapsed := time.Since(p.start).Seconds()
-	speed := float64(p.done) / elapsed // bytes/s
-	percent := float64(p.done) * 100 / float64(p.total)
+	if elapsed <= 0 {
+		elapsed = 0.001
+	}
+
+	done := atomic.LoadInt64(&p.done)
+	speed := float64(done) / elapsed
+
+	percent := 0.0
+	if p.total > 0 {
+		percent = float64(done) * 100 / float64(p.total)
+	}
 
 	barWidth := 100
-	filled := int(percent)
+	filled := int((percent / 100) * float64(barWidth))
 	if filled > barWidth {
 		filled = barWidth
 	}
+	if filled < 0 {
+		filled = 0
+	}
 
 	bar := strings.Repeat("=", filled) + strings.Repeat(" ", barWidth-filled)
+	remaining := 0
+	if p.total > 0 && speed > 0 {
+		remaining = int(float64(p.total-done) / speed)
+	}
 
 	fmt.Fprintf(
 		p.w,
 		"\r %s / %s [%s] %6.2f%% %s/s %ds",
-		humanSize(p.done),
+		humanSize(done),
 		humanSize(p.total),
 		bar,
 		percent,
 		humanSize(int64(speed)),
-		int(elapsed),
+		remaining,
 	)
 
 	return n, nil

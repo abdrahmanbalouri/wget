@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -28,7 +30,7 @@ func main() {
 	d := &Downloader{
 		outWriter:    os.Stdout,
 		errWriter:    os.Stderr,
-		saveDir:      *prefix,
+		saveDir:      expandPath(*prefix),
 		saveName:     *output,
 		convertLinks: *convert,
 	}
@@ -38,13 +40,24 @@ func main() {
 		if err != nil {
 			log.Fatal(err)
 		}
-		d.outWriter = f
-		d.errWriter = f
+		_ = f.Close()
+		if err := runInBackground(os.Args[1:]); err != nil {
+			log.Fatal(err)
+		}
 		fmt.Println(`Output will be written to "wget-log".`)
+		return
+	}
+
+	if *inputFile != "" {
+		urls = readLines(*inputFile)
 	}
 
 	if *rateLimitStr != "" {
-		d.rateLimit = parseRateLimit(*rateLimitStr)
+		limit, err := parseRateLimit(*rateLimitStr)
+		if err != nil {
+			log.Fatal(err)
+		}
+		d.rateLimit = limit
 	}
 
 	d.startTime = time.Now()
@@ -62,8 +75,8 @@ func main() {
 		return
 	}
 
-	if *inputFile != "" {
-		urls = readLines(*inputFile)
+	if len(urls) == 0 {
+		log.Fatal("missing URL or input file")
 	}
 
 	if len(urls) == 1 {
@@ -71,4 +84,39 @@ func main() {
 	} else {
 		d.downloadMultiple(urls)
 	}
+}
+
+func runInBackground(args []string) error {
+	filtered := make([]string, 0, len(args))
+	for _, arg := range args {
+		if arg == "-B" || arg == "--B" {
+			continue
+		}
+		filtered = append(filtered, arg)
+	}
+
+	logFile, err := os.OpenFile(logFileName, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		return err
+	}
+
+	exe, err := os.Executable()
+	if err != nil {
+		_ = logFile.Close()
+		return err
+	}
+
+	cmd := exec.Command(exe, filtered...)
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
+	cmd.Stdin = nil
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+
+	if err := cmd.Start(); err != nil {
+		_ = logFile.Close()
+		return err
+	}
+
+	_ = logFile.Close()
+	return cmd.Process.Release()
 }
